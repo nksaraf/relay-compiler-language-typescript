@@ -1,6 +1,7 @@
 import {
   Condition,
   Fragment,
+  IRTransforms,
   IRVisitor,
   LinkedField,
   Root,
@@ -9,8 +10,12 @@ import {
   TypeGenerator,
   TypeID
 } from "relay-compiler";
+import * as Printer from "relay-compiler/lib/core/IRPrinter";
+// @ts-ignore
+import * as Transformer from "relay-compiler/lib/core/IRTransformer";
 import { TypeGeneratorOptions } from "relay-compiler/lib/language/RelayLanguagePluginInterface";
 import * as FlattenTransform from "relay-compiler/lib/transforms/FlattenTransform";
+import * as InlineFragmentsTransform from "relay-compiler/lib/transforms/InlineFragmentsTransform";
 import * as MaskTransform from "relay-compiler/lib/transforms/MaskTransform";
 import * as MatchTransform from "relay-compiler/lib/transforms/MatchTransform";
 import * as RefetchableFragmentTransform from "relay-compiler/lib/transforms/RefetchableFragmentTransform";
@@ -48,6 +53,9 @@ export const generate: TypeGenerator["generate"] = (schema, node, options) => {
     IRVisitor.visit(node, createVisitor(schema, options))
   );
 
+  // @ts-ignore
+  // console.log(Printer.print);
+
   const printer = ts.createPrinter({ newLine: ts.NewLineKind.LineFeed });
 
   const resultFile = ts.createSourceFile(
@@ -60,7 +68,12 @@ export const generate: TypeGenerator["generate"] = (schema, node, options) => {
 
   const fullProgramAst = ts.updateSourceFileNode(resultFile, ast);
 
-  return printer.printNode(ts.EmitHint.SourceFile, fullProgramAst, resultFile);
+  return (
+    printer.printNode(ts.EmitHint.SourceFile, fullProgramAst, resultFile) +
+    (node.kind === "Root"
+      ? "\n/**QUERY**\n" + (node as any).query + "****/"
+      : "")
+  );
 };
 
 function aggregateRuntimeImports(ast: ts.Statement[]) {
@@ -1083,6 +1096,56 @@ function getDataTypeName(name: string): string {
   return `${name}$data`;
 }
 
+// @ts-ignore
+import * as IRTransformer from "relay-compiler/lib/core/IRTransformer";
+
+// type FragmentVisitorCache = Map<FragmentSpread, FragmentSpread>;
+// type FragmentVisitor = (fragmentSpread: FragmentSpread) => ?FragmentSpread;
+// /**
+//  * A transform that inlines all fragments and removes them.
+//  */
+// function inlineFragmentsTransform(context: CompilerContext): CompilerContext {
+//   const visitFragmentSpread = fragmentSpreadVisitor(new Map());
+//   return IRTransformer.transform(context, {
+//     Fragment: visitFragment,
+//     FragmentSpread: visitFragmentSpread,
+//   });
+// }
+
+// function visitFragment(fragment: Fragment): null {
+//   return null;
+// }
+
+// function fragmentSpreadVisitor(cache: FragmentVisitorCache): FragmentVisitor {
+//   return function visitFragmentSpread(fragmentSpread: FragmentSpread) {
+//     let traverseResult = cache.get(fragmentSpread);
+//     if (traverseResult != null) {
+//       return traverseResult;
+//     }
+//     invariant(
+//       fragmentSpread.args.length === 0,
+//       'InlineFragmentsTransform: Cannot flatten fragment spread `%s` with ' +
+//         'arguments. Use the `ApplyFragmentArgumentTransform` before flattening',
+//       fragmentSpread.name,
+//     );
+//     const fragment: Fragment = this.getContext().getFragment(
+//       fragmentSpread.name,
+//       fragmentSpread.loc,
+//     );
+//     const result: InlineFragment = {
+//       kind: 'InlineFragment',
+//       directives: fragmentSpread.directives,
+//       loc: {kind: 'Derived', source: fragmentSpread.loc},
+//       metadata: fragmentSpread.metadata,
+//       selections: fragment.selections,
+//       typeCondition: fragment.type,
+//     };
+//     traverseResult = this.traverse(result);
+//     cache.set(fragmentSpread, traverseResult);
+//     return traverseResult;
+//   };
+// }
+
 // Should match FLOW_TRANSFORMS array
 // https://github.com/facebook/relay/blob/v10.0.0/packages/relay-compiler/language/javascript/RelayFlowGenerator.js#L982
 export const transforms: TypeGenerator["transforms"] = [
@@ -1090,5 +1153,26 @@ export const transforms: TypeGenerator["transforms"] = [
   MaskTransform.transform,
   MatchTransform.transform,
   FlattenTransform.transformWithOptions({}),
-  RefetchableFragmentTransform.transform
+  RefetchableFragmentTransform.transform,
+  c => {
+    const inlinedContext = c.applyTransforms([
+      InlineFragmentsTransform.transform,
+      FlattenTransform.transformWithOptions({})
+    ]);
+
+    // doc => {
+    //   if (doc.kind === "Root") {
+    //     (doc as any).query ==
+    //       //@ts-ignore
+    //       Printer.print(c.getSchema(), inlinedContext.get(doc.name));
+    //   }
+    // }
+    return IRTransformer.transform(c, {
+      Root: (root: any) => ({
+        ...root,
+        // @ts-ignore
+        query: Printer.print(c.getSchema(), inlinedContext.get(root.name))
+      })
+    });
+  }
 ];
